@@ -75,6 +75,8 @@
   }
   #uploadStatus { min-height: 16px; margin-top: 4px; }
   #overlay-end, #overlay-start { }
+  /* 結算罩改淡，讓 canvas 畫的「打爆現場」底圖透出來 */
+  #overlay-end { background: radial-gradient(ellipse at center, rgba(20,14,8,.45), rgba(8,5,3,.82)); }
   #overlay-end[hidden], #overlay-start[hidden] { display: none; }
 </style>
 </head>
@@ -552,6 +554,7 @@ function resetGame(diff) {
   pows = []; splats = []; zoomPulse = 1;
   aimStart = null; aimNow = null;
   oil.active = false; oil.fade = 0; oil.telegraphT = 0; oil.nextIdx = 0; oil.wiping = false;
+  endScene = null;
   villain.baseY = H * 0.24; villain.y = villain.baseY; villain.speed = 1; villain.dir = 1;
   villain.x = W / 2; villain.hits = 0; villain.bounce = 0; villain.scale = 1;
   villain.maxScale = (H * 1.15) / VILLAIN_BASE_H; // 命中滿目標次數時視覺上佔滿畫面
@@ -559,6 +562,11 @@ function resetGame(diff) {
 }
 function pick(arr) { return arr[Math.floor(Math.random() * arr.length)]; }
 function pickIdx(arr) { return Math.floor(Math.random() * arr.length); }
+// 「又不是我逼你吃」是招牌梗（villainTaunts[6]），3 成機率直接選它
+function pickTauntIdx() {
+  if (Math.random() < 0.3) return 6;
+  return pickIdx(CONFIG.villainTaunts);
+}
 
 // 依膨脹進度百分比切換對手表情圖（0-25%/25-50%/50-75%/75-100%），缺圖時自動退回上一階
 // 若使用者上傳了自訂靶，一律優先使用（自訂靶目前只有單張圖，靠縮放表現膨脹，沒有多階表情）
@@ -720,7 +728,7 @@ function update(dt) {
 
   tauntTimer -= dt;
   if (tauntTimer <= 0) {
-    const ti = pickIdx(CONFIG.villainTaunts);
+    const ti = pickTauntIdx();
     currentTaunt = CONFIG.villainTaunts[ti];
     tauntTimer = 2.4 + Math.random() * 1.6;
     playVoice("t" + ti); // 嘴砲配音（上一句沒講完就只換字幕）
@@ -728,9 +736,11 @@ function update(dt) {
 
   for (let i = projectiles.length - 1; i >= 0; i--) {
     const p = projectiles[i];
+    if (!p) continue;
     p.vy += GRAVITY * dt; p.x += p.vx * dt; p.y += p.vy * dt; p.rot += dt * 10;
     const dist = Math.hypot(p.x - villain.x, p.y - (villain.y + 10 * villain.scale));
-    if (dist < 46 * villain.scale) { onHit(p); projectiles.splice(i, 1); continue; }
+    // 勝利時 winGame 會清空拋射物陣列，必須立刻跳出迴圈，否則讀到空洞索引會當機
+    if (dist < 46 * villain.scale) { onHit(p); projectiles.splice(i, 1); if (state !== "playing") break; continue; }
     if (p.y > H + 40 || p.x < -40 || p.x > W + 40) {
       projectiles.splice(i, 1);
       // miss 不再直接歸零連擊（連發時流彈會誤傷手感），連擊靠 1.2 秒沒命中自然斷
@@ -851,6 +861,86 @@ function spawnFragments() {
   }
 }
 
+/* ---------- 戰報底圖：被打爆現場（用現有素材合成，一次生成定格資料避免每幀閃爍） ---------- */
+let endScene = null;
+function buildEndScene() {
+  const props = [];
+  for (let i = 0; i < 9; i++) {
+    props.push({
+      type: pick(CONFIG.ammo),
+      x: W * (0.08 + Math.random() * 0.84),
+      y: H * (0.6 + Math.random() * 0.32),
+      rot: Math.random() * Math.PI * 2,
+      s: 34 + Math.random() * 28
+    });
+  }
+  const pools = [];
+  for (let i = 0; i < 6; i++) {
+    pools.push({ x: W * Math.random(), y: H * (0.68 + Math.random() * 0.3), rx: 60 + Math.random() * 95, ry: 13 + Math.random() * 18 });
+  }
+  endScene = { props, pools, stampRot: -0.32 + Math.random() * 0.18 };
+}
+function renderEndScene() {
+  ctx.save();
+  drawBackground();
+  // 滿地黑油
+  ctx.fillStyle = "#120c05";
+  ctx.globalAlpha = 0.85;
+  for (const p of endScene.pools) {
+    ctx.beginPath(); ctx.ellipse(p.x, p.y, p.rx, p.ry, 0, 0, Math.PI * 2); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+  // 散落的黑心食物
+  for (const pr of endScene.props) {
+    const img = IMAGES[pr.type];
+    ctx.save(); ctx.translate(pr.x, pr.y); ctx.rotate(pr.rot);
+    if (img && img.complete && img.naturalWidth) ctx.drawImage(img, -pr.s / 2, -pr.s / 2, pr.s, pr.s);
+    ctx.restore();
+  }
+  // 被打爆的商人：爆裂芒＋最腫表情＋頭頂轉圈星星＋「黑心認證」大戳章
+  const cx = W / 2, cy = H * 0.24; // 商人靠上，避開中央戰報文字區
+  drawBurstRays(cx, cy, 0.55);
+  const vImg = (IMAGES.villain_stage4 && IMAGES.villain_stage4.complete && IMAGES.villain_stage4.naturalWidth)
+    ? IMAGES.villain_stage4 : currentVillainImg();
+  if (vImg && vImg.naturalWidth) {
+    const bh = 215, bw = bh * (vImg.naturalWidth / vImg.naturalHeight);
+    ctx.save(); ctx.translate(cx, cy); ctx.rotate(0.06);
+    ctx.drawImage(vImg, -bw / 2, -bh / 2, bw, bh);
+    ctx.restore();
+  }
+  const t = performance.now() / 500;
+  for (let i = 0; i < 5; i++) { // 頭頂昏迷星星轉圈
+    const a = t + (i / 5) * Math.PI * 2;
+    drawSmallStar(cx + Math.cos(a) * 84, cy - 116 + Math.sin(a) * 14, 9);
+  }
+  ctx.save(); // 戳章直接蓋在臉上
+  ctx.translate(cx, cy + 12); ctx.rotate(endScene.stampRot);
+  ctx.globalAlpha = 0.92;
+  ctx.font = "900 30px sans-serif"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  const sw = ctx.measureText(CONFIG.hitStampText).width + 34;
+  ctx.strokeStyle = "#c0392b"; ctx.lineWidth = 4;
+  ctx.strokeRect(-sw / 2, -27, sw, 54);
+  ctx.fillStyle = "#c0392b";
+  ctx.fillText(CONFIG.hitStampText, 0, 0);
+  ctx.restore();
+  ctx.restore();
+}
+function drawSmallStar(x, y, r) {
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.beginPath();
+  for (let i = 0; i < 10; i++) {
+    const rad = i % 2 === 0 ? r : r * 0.45;
+    const a = (i / 10) * Math.PI * 2 - Math.PI / 2;
+    const px = Math.cos(a) * rad, py = Math.sin(a) * rad;
+    if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+  }
+  ctx.closePath();
+  ctx.fillStyle = "#f4d03f"; ctx.fill();
+  ctx.lineWidth = 1.5; ctx.strokeStyle = "#1b140f"; ctx.stroke();
+  ctx.restore();
+}
+
 function updateExplosion(dt) {
   explodeTimer -= dt;
   flashAlpha = Math.max(0, flashAlpha - dt * 3.2);
@@ -905,6 +995,7 @@ function drawBurstRays(cx, cy, t) {
 
 /* ---------- 渲染 ---------- */
 function render() {
+  if (state === "over" && endScene) { renderEndScene(); return; } // 戰報底圖：被打爆現場
   ctx.save();
   const sx = (Math.random() - 0.5) * shake, sy = (Math.random() - 0.5) * shake;
   ctx.translate(sx, sy);
@@ -1110,6 +1201,7 @@ function formatTime(sec) {
 }
 function showEndScreen() {
   stopBgm();
+  buildEndScene();
   document.getElementById("finalScore").textContent = formatTime(elapsed);
   document.getElementById("finalScoreLabel").textContent = `${currentDifficulty.label}難度・命中 ${villain.hits} 次`;
   document.getElementById("finalRank").textContent = currentDifficulty.title;
